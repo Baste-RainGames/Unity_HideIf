@@ -1,6 +1,9 @@
-﻿using System.Collections;
+﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using UnityEditor;
 using UnityEngine;
+using Object = UnityEngine.Object;
 
 public class HideIfExampleScript : MonoBehaviour {
     
@@ -40,4 +43,58 @@ public class HideIfExampleScript : MonoBehaviour {
         Val2,
         Val3
     }
+    
+    //Showing that this works for PropertyDrawers, with inheritance
+    public bool hide;
+
+    public TestData a;
+    [HideIf("hide", true)]
+    public TestData b;
+    [HideIf("hide", true)]
+    public TestDataParent c;
+    public TestDataParent d;
+
 }
+
+
+
+[Serializable]
+public class TestDataParent {
+    public int a;
+    public string b;
+}
+
+[Serializable]
+public class TestData : TestDataParent {
+
+}
+
+#if UNITY_EDITOR
+[CustomPropertyDrawer(typeof(TestDataParent), true)]
+public class TestDataDrawer : PropertyDrawer {
+
+    public override void OnGUI(Rect position, SerializedProperty property, GUIContent label) {
+        var startingX = position.x;
+
+        position.height = EditorGUIUtility.singleLineHeight;
+        position.width /= 2f;
+        EditorGUI.LabelField(position, "WOO");
+
+        position.x = startingX + position.width;
+
+        EditorGUI.PropertyField(position, property.FindPropertyRelative("a"));
+
+        position.x = startingX;
+        position.y += position.height + EditorGUIUtility.standardVerticalSpacing;
+
+        EditorGUI.LabelField(position, "Hoo");
+        position.x = startingX + position.width;
+
+        EditorGUI.PropertyField(position, property.FindPropertyRelative("b"));
+    }
+
+    public override float GetPropertyHeight(SerializedProperty property, GUIContent label) {
+        return base.GetPropertyHeight(property, label) * 2f;
+    }
+}
+#endif

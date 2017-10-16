@@ -1,5 +1,10 @@
-﻿using UnityEngine;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using UnityEngine;
 using UnityEditor;
+using HideIf_Utilities;
 
 public abstract class HidingAttributeDrawer : PropertyDrawer {
 
@@ -14,7 +19,9 @@ public abstract class HidingAttributeDrawer : PropertyDrawer {
 
             HidingAttribute[] attachedAttributes =
                 (HidingAttribute[])
-                    property.serializedObject.targetObject.GetType().GetField(property.name).GetCustomAttributes(typeof (HidingAttribute), false);
+                property.serializedObject.targetObject.GetType()
+                        .GetField(property.name)
+                        .GetCustomAttributes(typeof (HidingAttribute), false);
 
             foreach (var hider in attachedAttributes) {
                 if (!ShouldDraw(property.serializedObject, hider)) {
@@ -29,21 +36,85 @@ public abstract class HidingAttributeDrawer : PropertyDrawer {
         }
     }
 
+    /// <summary>
+    /// Type to PropertyDrawer types for that type
+    /// </summary>
+    private static Dictionary<Type, Type> typeToDrawerType;
+
+    /// <summary>
+    /// PropertyDrawer types to instances of that type 
+    /// </summary>
+    private static Dictionary<Type, PropertyDrawer> drawerTypeToDrawerInstance;
+
     public override void OnGUI(Rect position, SerializedProperty property, GUIContent label) {
         if (!CheckShouldHide(property)) {
-            EditorGUI.PropertyField(position, property, true);
+            if (typeToDrawerType == null)
+                PopulateTypeToDrawer();
+
+            Type drawerType;
+            var typeOfProp = Utilities.GetTargetObjectOfProperty(property).GetType();
+            if (typeToDrawerType.TryGetValue(typeOfProp, out drawerType)) {
+                var drawer = drawerTypeToDrawerInstance.GetOrAdd(drawerType, () => CreateDrawerInstance(drawerType));
+                drawer.OnGUI(position, property, label);
+            }
+            else {
+                EditorGUI.PropertyField(position, property, true);
+            }
         }
     }
 
-    public abstract bool ShouldDraw(SerializedObject obj);
-
     public override float GetPropertyHeight(SerializedProperty property, GUIContent label) {
         //Even if the property height is 0, the property gets margins of 1 both up and down.
-        //So to truly hide it, we have to hack a height of -2 to counteract that! 
-        return !CheckShouldHide(property) ? base.GetPropertyHeight(property, label) : -2f;
+        //So to truly hide it, we have to hack a height of -2 to counteract that!
+        if (CheckShouldHide(property))
+            return -2;
+
+        if (typeToDrawerType == null)
+            PopulateTypeToDrawer();
+
+        Type drawerType;
+        var typeOfProp = Utilities.GetTargetObjectOfProperty(property).GetType();
+        if (typeToDrawerType.TryGetValue(typeOfProp, out drawerType)) {
+            var drawer = drawerTypeToDrawerInstance.GetOrAdd(drawerType, () => CreateDrawerInstance(drawerType));
+            return drawer.GetPropertyHeight(property, label);
+        }
+        return EditorGUI.GetPropertyHeight(property, label, true);
     }
 
-    public static bool ShouldDraw(SerializedObject obj, HidingAttribute hider) {
+    private PropertyDrawer CreateDrawerInstance(Type drawerType) {
+        return (PropertyDrawer) Activator.CreateInstance(drawerType);
+    }
+
+    private void PopulateTypeToDrawer() {
+        typeToDrawerType = new Dictionary<Type, Type>();
+        drawerTypeToDrawerInstance = new Dictionary<Type, PropertyDrawer>();
+        var propertyDrawerType = typeof (PropertyDrawer);
+        var targetType = typeof (CustomPropertyDrawer).GetField("m_Type", BindingFlags.Instance | BindingFlags.NonPublic);
+        var useForChildren = typeof (CustomPropertyDrawer).GetField("m_UseForChildren", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        var types = AppDomain.CurrentDomain.GetAssemblies().SelectMany(assembly => assembly.GetTypes());
+
+        foreach (Type type in types) {
+            if (propertyDrawerType.IsAssignableFrom(type)) {
+                var customPropertyDrawers = type.GetCustomAttributes(true).OfType<CustomPropertyDrawer>().ToList();
+                foreach (var propertyDrawer in customPropertyDrawers) {
+                    var targetedType = (Type) targetType.GetValue(propertyDrawer);
+                    typeToDrawerType[targetedType] = type;
+
+                    var useThisForChildren = (bool) useForChildren.GetValue(propertyDrawer);
+                    if (useThisForChildren) {
+                        var childTypes = types.Where(t => targetedType.IsAssignableFrom(t) && t != targetedType);
+                        foreach (var childType in childTypes) {
+                            typeToDrawerType[childType] = type;
+                        }
+                    }
+                }
+
+            }
+        }
+    }
+
+    private static bool ShouldDraw(SerializedObject obj, HidingAttribute hider) {
         var hideIf = hider as HideIfAttribute;
         if (hideIf != null) {
             return HideIfAttributeDrawer.ShouldDraw(obj, hideIf);
@@ -64,18 +135,14 @@ public abstract class HidingAttributeDrawer : PropertyDrawer {
             return HideIfEnumValueAttributeDrawer.ShouldDraw(obj, hideIfEnum);
         }
 
-        Debug.LogWarning("Trying to check unknown hider type: " + hider.GetType().Name);
+        Debug.LogWarning("Trying to check unknown hider loadingType: " + hider.GetType().Name);
         return false;
     }
+
 }
 
 [CustomPropertyDrawer(typeof (HideIfAttribute))]
 public class HideIfAttributeDrawer : HidingAttributeDrawer {
-
-    public override bool ShouldDraw(SerializedObject obj) {
-        return ShouldDraw(obj, attribute as HideIfAttribute);
-    }
-
     public static bool ShouldDraw(SerializedObject obj, HideIfAttribute attribute) {
         var prop = obj.FindProperty(attribute.variable);
         if (prop == null) {
@@ -87,11 +154,6 @@ public class HideIfAttributeDrawer : HidingAttributeDrawer {
 
 [CustomPropertyDrawer(typeof (HideIfNullAttribute))]
 public class HideIfNullAttributeDrawer : HidingAttributeDrawer {
-
-    public override bool ShouldDraw(SerializedObject obj) {
-        return ShouldDraw(obj, attribute as HideIfNullAttribute);
-    }
-
     public static bool ShouldDraw(SerializedObject obj, HideIfNullAttribute hideIfNullAttribute) {
         var prop = obj.FindProperty(hideIfNullAttribute.variable);
         if (prop == null) {
@@ -104,11 +166,6 @@ public class HideIfNullAttributeDrawer : HidingAttributeDrawer {
 
 [CustomPropertyDrawer(typeof (HideIfNotNullAttribute))]
 public class HideIfNotNullAttributeDrawer : HidingAttributeDrawer {
-
-    public override bool ShouldDraw(SerializedObject obj) {
-        return ShouldDraw(obj, attribute as HideIfNotNullAttribute);
-    }
-
     public static bool ShouldDraw(SerializedObject obj, HideIfNotNullAttribute hideIfNotNullAttribute) {
         var prop = obj.FindProperty(hideIfNotNullAttribute.variable);
         if (prop == null) {
@@ -121,22 +178,12 @@ public class HideIfNotNullAttributeDrawer : HidingAttributeDrawer {
 
 [CustomPropertyDrawer(typeof (HideIfEnumValueAttribute))]
 public class HideIfEnumValueAttributeDrawer : HidingAttributeDrawer {
-
-    public override bool ShouldDraw(SerializedObject obj) {
-        return ShouldDraw(obj, attribute as HideIfEnumValueAttribute);
-    }
-
     public static bool ShouldDraw(SerializedObject obj, HideIfEnumValueAttribute hideIfEnumValueAttribute) {
         var enumProp = obj.FindProperty(hideIfEnumValueAttribute.variable);
         var states = hideIfEnumValueAttribute.states;
-        
-        bool equal = false;
-        for(int i = 0; i < states.Length; i++) {
-            if(states[i] == enumProp.intValue) {
-                equal = true; //enumProp.enumValueIndex gives the order in the enum list, not the actual enum value
-                break; 
-            }
-        }
+
+        //enumProp.enumValueIndex gives the order in the enum list, not the actual enum value
+        bool equal = states.Contains(enumProp.intValue);
 
         return equal != hideIfEnumValueAttribute.hideIfEqual;
     }
